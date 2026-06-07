@@ -440,8 +440,11 @@ static void render_setup_screen(surface_t *disp)
 {
     char line[96];
     int y = UI_Y_PADDING + 12;
+    int screen_w = display_get_width();
     int col_left = UI_X_PADDING;
-    int col_right = display_get_width() / 2 + 6;
+    int col_right = screen_w / 2 + 4;
+    int left_w = col_right - col_left - 6;
+    int right_w = screen_w - col_right - UI_X_PADDING + 2;
     int footer_y = display_get_height() - 12;
     int tests_y_start = UI_Y_PADDING + 12 + (UI_LINE_HEIGHT * 5) + 4;
     int tests_rows_visible = (footer_y - tests_y_start) / UI_LINE_HEIGHT;
@@ -464,27 +467,27 @@ static void render_setup_screen(surface_t *disp)
     if (tests_last > MEMTEST_ID_COUNT) tests_last = MEMTEST_ID_COUNT;
 
     snprintf(line, sizeof(line), "Profile: %s", memtest_profile_name(g_profile));
-    draw_row(disp, col_left, 280, y, g_setup_cursor == row++, g_pal.fg, line);
+    draw_row(disp, col_left, left_w, y, g_setup_cursor == row++, g_pal.fg, line);
     y += UI_LINE_HEIGHT;
 
     snprintf(line, sizeof(line), "Loops: %s", loop_target_name(g_loop_target));
-    draw_row(disp, col_left, 280, y, g_setup_cursor == row++, g_pal.fg, line);
+    draw_row(disp, col_left, left_w, y, g_setup_cursor == row++, g_pal.fg, line);
     y += UI_LINE_HEIGHT;
 
     snprintf(line, sizeof(line), "Start test run");
-    draw_row(disp, col_left, 280, y, g_setup_cursor == row++, g_pal.ok, line);
+    draw_row(disp, col_left, left_w, y, g_setup_cursor == row++, g_pal.ok, line);
     y += UI_LINE_HEIGHT + 4;
 
     graphics_set_color(g_pal.muted, g_pal.panel);
-    graphics_draw_text(disp, col_left, y, "Banks (1 MiB each):");
-    snprintf(line, sizeof(line), "Tests (%d-%d/%d):", tests_first + 1, tests_last, MEMTEST_ID_COUNT);
+    graphics_draw_text(disp, col_left, y, "Banks (1MiB):");
+    snprintf(line, sizeof(line), "Tests %d-%d/%d:", tests_first + 1, tests_last, MEMTEST_ID_COUNT);
     graphics_draw_text(disp, col_right, y, line);
 
     y += UI_LINE_HEIGHT;
     for (i = 0; i < g_total_banks; i++) {
         const char *status = g_bank_available[i] ? (g_bank_enabled[i] ? "ON " : "OFF") : "N/A";
         snprintf(line, sizeof(line), "Bank %d: %s", i, status);
-        draw_row(disp, col_left, 230, y, g_setup_cursor == (SETUP_ROW_BANK_BASE + i), g_pal.fg, line);
+        draw_row(disp, col_left, left_w, y, g_setup_cursor == (SETUP_ROW_BANK_BASE + i), g_pal.fg, line);
         y += UI_LINE_HEIGHT;
     }
 
@@ -492,7 +495,7 @@ static void render_setup_screen(surface_t *disp)
     for (i = tests_first; i < tests_last; i++) {
         const memtest_desc_t *desc = memtest_desc((memtest_id_t)i);
         snprintf(line, sizeof(line), "[%c] %s", g_test_enabled[i] ? 'x' : ' ', desc ? desc->name : "?");
-        draw_row(disp, col_right, 300, y, g_setup_cursor == (test_row_base + i), g_pal.fg, line);
+        draw_row(disp, col_right, right_w, y, g_setup_cursor == (test_row_base + i), g_pal.fg, line);
         y += UI_LINE_HEIGHT;
     }
 }
@@ -520,21 +523,21 @@ static void render_running_screen(surface_t *disp)
     graphics_draw_text(disp, left, UI_Y_PADDING + 36, line);
 
     if (has_progress) {
-        snprintf(line, sizeof(line), "Bank: %d / %d   Total progress: %lu%%", g_current_bank, g_total_banks - 1, (unsigned long)progress_pct);
+    snprintf(line, sizeof(line), "Bank %d/%d  Total: %lu%%", g_current_bank, g_total_banks - 1, (unsigned long)progress_pct);
     } else {
-        snprintf(line, sizeof(line), "Bank: %d / %d   Total progress: N/A", g_current_bank, g_total_banks - 1);
+        snprintf(line, sizeof(line), "Bank %d/%d  Total: N/A", g_current_bank, g_total_banks - 1);
     }
     graphics_draw_text(disp, left, UI_Y_PADDING + 48, line);
 
-    snprintf(line, sizeof(line), "Bytes tested: %lu KiB   Slices: %lu",
+    snprintf(line, sizeof(line), "Tested: %lu KiB  Slices: %lu",
              (unsigned long)(g_bytes_tested / 1024U), (unsigned long)g_slices_done);
     graphics_draw_text(disp, left, UI_Y_PADDING + 60, line);
 
     graphics_set_color(g_pal.muted, g_pal.panel);
-    graphics_draw_text(disp, left, UI_Y_PADDING + 78, "Current errors");
+    graphics_draw_text(disp, left, UI_Y_PADDING + 78, "Errors");
 
     graphics_set_color(g_error_count ? g_pal.fail : g_pal.ok, g_pal.panel);
-    snprintf(line, sizeof(line), "Errors: %lu   Restore errors: %lu",
+    snprintf(line, sizeof(line), "Err: %lu  Restore: %lu",
              (unsigned long)g_error_count, (unsigned long)g_restore_error_count);
     graphics_draw_text(disp, left, UI_Y_PADDING + 90, line);
 
@@ -542,7 +545,7 @@ static void render_running_screen(surface_t *disp)
         uint32_t shown = 0;
         uint32_t idx = g_failure_log_head;
         graphics_set_color(g_pal.muted, g_pal.panel);
-        graphics_draw_text(disp, right, UI_Y_PADDING + 12, "Corrupted addresses (latest)");
+        graphics_draw_text(disp, right, UI_Y_PADDING + 12, "Latest fails");
         graphics_set_color(g_pal.fail, g_pal.panel);
         while (shown < g_failure_log_count && shown < 8) {
             const mem_failure_t *entry;
@@ -561,7 +564,7 @@ static void render_running_screen(surface_t *disp)
         }
     } else {
         graphics_set_color(g_pal.ok, g_pal.panel);
-        graphics_draw_text(disp, right, UI_Y_PADDING + 24, "No mismatches recorded.");
+        graphics_draw_text(disp, right, UI_Y_PADDING + 24, "No mismatches.");
     }
 }
 
@@ -570,19 +573,19 @@ static void render_report_screen(surface_t *disp)
     char line[112];
     char elapsed_compact[32];
     graphics_set_color(g_pal.fg, g_pal.panel);
-    graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 12, "Run report");
+    graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 12, "Report");
 
-    snprintf(line, sizeof(line), "Loops completed: %lu", (unsigned long)g_loop_completed);
+    snprintf(line, sizeof(line), "Loops: %lu", (unsigned long)g_loop_completed);
     graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 28, line);
 
-    snprintf(line, sizeof(line), "Bytes tested: %lu KiB", (unsigned long)(g_bytes_tested / 1024U));
+    snprintf(line, sizeof(line), "Tested: %lu KiB", (unsigned long)(g_bytes_tested / 1024U));
     graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 40, line);
 
     snprintf(line, sizeof(line), "Slices: %lu", (unsigned long)g_slices_done);
     graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 52, line);
 
     graphics_set_color(g_error_count ? g_pal.fail : g_pal.ok, g_pal.panel);
-    snprintf(line, sizeof(line), "Errors: %lu  Restore errors: %lu",
+    snprintf(line, sizeof(line), "Err: %lu  Restore: %lu",
              (unsigned long)g_error_count, (unsigned long)g_restore_error_count);
     graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 64, line);
 
@@ -596,7 +599,7 @@ static void render_report_screen(surface_t *disp)
         const mem_failure_t *last = &g_failure_log[idx];
         const memtest_desc_t *desc = memtest_desc(last->test);
         graphics_set_color(g_pal.fail, g_pal.panel);
-        snprintf(line, sizeof(line), "Last fail: bank %u, %s, pass %lu, addr %08lX", last->bank,
+        snprintf(line, sizeof(line), "Last: B%u %s P%lu A:%08lX", last->bank,
                  desc ? desc->name : "?", (unsigned long)(last->pass + 1), (unsigned long)last->address);
         graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 96, line);
     }
@@ -608,11 +611,11 @@ static void render_footer(surface_t *disp)
     int footer_y = display_get_height() - 12;
 
     if (g_run_state == RUN_IDLE) {
-        left_hint = "A: select/toggle  B: defaults  C/L: quick  R: full  Z: burn-in";
+        left_hint = "A: toggle  B: default  C/L:quick  R:full  Z:burn";
     } else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) {
-        left_hint = "Start: pause/resume  B: stop graceful";
+        left_hint = "Start: pause/resume  B: stop";
     } else {
-        left_hint = "A: back to setup  Start: run again";
+        left_hint = "A: setup  Start: rerun";
     }
 
     graphics_set_color(g_pal.muted, g_pal.panel);
@@ -621,7 +624,7 @@ static void render_footer(surface_t *disp)
 
 static void render_frame(surface_t *disp)
 {
-    const char *title = "N64Memtest 0.8 - Coded by Rasky with Libdragon";
+    const char *title = "N64Memtest 0.8 - Rasky/Libdragon";
     int topbar_h = 10;
     graphics_fill_screen(disp, g_pal.bg);
     graphics_draw_box(disp, 2, 2, display_get_width() - 4, display_get_height() - 4, g_pal.panel);
@@ -720,7 +723,7 @@ int main(void)
     debug_init_emulog();
     debug_init_usblog();
     display_init((resolution_t){
-        .width = 640, .height = 240, .overscan_margin = VI_CRT_MARGIN
+        .width = 440, .height = 240, .overscan_margin = VI_CRT_MARGIN
     }, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_RESAMPLE);
     joypad_init();
     rsp_init();
