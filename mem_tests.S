@@ -1,5 +1,5 @@
 /*
- * uintptr_t memtest_run_slice_critical_asm(uint8_t *chunk, uint32_t test_pass, uint32_t seed)
+ * uintptr_t mem_test(uint8_t *chunk, uint32_t test_pass, uint32_t seed)
  *
  * Arguments:
  *   a0 = chunk pointer (uncached KSEG1 address, 8 KiB aligned region)
@@ -17,8 +17,8 @@
 
     .set noreorder
     .text
-    .globl memtest_run_slice_critical_asm
-    .ent memtest_run_slice_critical_asm
+    .globl mem_test
+    .ent mem_test
 
 /* Registers with fixed semantic role across the whole routine. */
 #define arg_chunk               $a0
@@ -32,11 +32,11 @@
 #define reg_pass_mix            $t9
 #define ra2                     $v1
 
-memtest_run_slice_critical_asm:
+mem_test:
     /*
      * Prime this function body into I-cache before running any test logic.
      *
-     * for (p = &memtest_run_slice_critical_asm; p < &memtest_run_slice_critical_asm_end; p += 32) {
+     * for (p = &mem_test; p < &mem_test_end; p += 32) {
      *     cache HIT_FILL, 0(p);
      * }
      *
@@ -45,8 +45,8 @@ memtest_run_slice_critical_asm:
      */
 #define icache_ptr              $t0
 #define icache_end              $t1
-    la      icache_ptr, memtest_run_slice_critical_asm
-    la      icache_end, memtest_run_slice_critical_asm_end
+    la      icache_ptr, mem_test
+    la      icache_end, mem_test_end
 
 icache_fill_loop:
     sltu    $t2, icache_ptr, icache_end
@@ -1324,8 +1324,8 @@ compare_region_with_sp_done:
     jr      $ra
     nop
 
-    .globl memtest_run_slice_critical_asm_end
-memtest_run_slice_critical_asm_end:
+    .globl mem_test_end
+mem_test_end:
     nop
 
-    .end memtest_run_slice_critical_asm
+    .end mem_test

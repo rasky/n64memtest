@@ -120,8 +120,8 @@ void memtest_run_slice(void)
     // written into RDRAM asynchronously while the test is running.
     while (*SI_STATUS & 1) {}
 
-    //data_cache_writeback_invalidate_all();
-    fail_addr = memtest_run_slice_critical_asm(chunk, packed_test_pass, g_rng_seed);
+    // Run the test (assembly)
+    fail_addr = mem_test(chunk, packed_test_pass, g_rng_seed);
 
     enable_interrupts();
 

@@ -93,7 +93,9 @@ const memtest_desc_t *memtest_desc(memtest_id_t id);
 const char *memtest_profile_name(memtest_profile_t profile);
 void memtest_apply_profile_defaults(memtest_profile_t profile, bool enabled[MEMTEST_ID_COUNT]);
 uint32_t memtest_pattern_word(memtest_id_t id, uint32_t pass, uint32_t word_index, uint32_t seed);
-uintptr_t memtest_run_slice_critical_asm(uint8_t *chunk, uint32_t test_pass, uint32_t seed);
 void memtest_run_slice(void);
+
+// Run a single test on a chunk of memory (mem_test.S)
+uintptr_t mem_test(uint8_t *chunk, uint32_t test_pass, uint32_t seed);
 
 #endif
