@@ -1,4 +1,4 @@
-#include "mem_tests.h"
+#include "mem_test_engine.h"
 #include <libdragon.h>
 #include <string.h>
 

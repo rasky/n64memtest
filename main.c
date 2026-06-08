@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mem_tests.h"
+#include "mem_test_engine.h"
 #include "logo.h"
 
 #define UI_LINE_HEIGHT 10
