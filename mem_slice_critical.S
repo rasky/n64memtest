@@ -1,7 +1,7 @@
 /*
  * uintptr_t memtest_run_slice_critical_asm(uint8_t *chunk, uint32_t test_pass, uint32_t seed)
  *
- * ABI:
+ * Arguments:
  *   a0 = chunk pointer (uncached KSEG1 address, 8 KiB aligned region)
  *   a1 = packed [pass:24 | test_id:8]
  *   a2 = seed
@@ -12,10 +12,7 @@
  *
  * Design constraints:
  *   - no stack usage
- *   - no subcalls (single monolithic routine)
- *   - no J/JAL; only PC-relative branches + JR RA at exit
- *   - fixed chunk size = 8 KiB (4 KiB DMEM + 4 KiB IMEM)
- *   - report mode always enabled via failing address in v0
+ *   - one call depth (main routine -> leaf helpers), no nested calls
  */
 
     .set noreorder
@@ -33,6 +30,7 @@
 #define reg_sp_base             $t7
 #define reg_test_id             $t8
 #define reg_pass_mix            $t9
+#define ra2                     $v1
 
 memtest_run_slice_critical_asm:
     /*
@@ -62,6 +60,9 @@ icache_fill_loop:
 #undef icache_end
 
 icache_fill_done:
+    /* Preserve caller return address because jal is used below. */
+    move    ra2, $ra
+
     /* fail_addr = 0; */
     move    ret_fail_addr, $zero
 
@@ -91,37 +92,21 @@ icache_fill_done:
     /* ---------- PHASE 1: Save original chunk to RSP DMEM/IMEM ---------- */
     li      reg_sp_base, 0xA4040000
 
-wait_dma_idle_before_save_dmem:
-    lw      $t5, 0x0010(reg_sp_base)
-    andi    $t5, $t5, 0x000C
-    bnez    $t5, wait_dma_idle_before_save_dmem
+    jal     sp_dma_wait
     nop
 
     /* DMA IN: DRAM chunk[0..4095] -> SP DMEM[0..4095] */
-    sw      arg_chunk, 0x0004(reg_sp_base)           /* SP_DMA_RAMADDR */
-    move    $t5, $zero
-    sw      $t5, 0x0000(reg_sp_base)           /* SP_DMA_SPADDR = 0 (DMEM) */
-    li      $t5, 4095
-    sw      $t5, 0x0008(reg_sp_base)           /* SP_DMA_RDLEN = size-1 */
-
-wait_dma_done_save_dmem:
-    lw      $t5, 0x0010(reg_sp_base)
-    andi    $t5, $t5, 0x000C
-    bnez    $t5, wait_dma_done_save_dmem
+    move    $t0, arg_chunk      /* dram addr */
+    move    $t1, $zero          /* sp addr (DMEM) */
+    li      $t2, 4095           /* len-1 */
+    jal     sp_dma_read
     nop
 
     /* DMA IN: DRAM chunk[4096..8191] -> SP IMEM[0..4095] */
-    addiu   $t5, arg_chunk, 4096
-    sw      $t5, 0x0004(reg_sp_base)           /* SP_DMA_RAMADDR = chunk + 4K */
-    li      $t5, 4096
-    sw      $t5, 0x0000(reg_sp_base)           /* SP_DMA_SPADDR = 4096 (IMEM base) */
-    li      $t5, 4095
-    sw      $t5, 0x0008(reg_sp_base)           /* SP_DMA_RDLEN = size-1 */
-
-wait_dma_done_save_imem:
-    lw      $t5, 0x0010(reg_sp_base)
-    andi    $t5, $t5, 0x000C
-    bnez    $t5, wait_dma_done_save_imem
+    addiu   $t0, arg_chunk, 4096 /* dram addr */
+    li      $t1, 4096            /* sp addr (IMEM base) */
+    li      $t2, 4095            /* len-1 */
+    jal     sp_dma_read
     nop
 
     /* ---------- PHASE 2: Execute selected test algorithm ---------- */
@@ -144,7 +129,10 @@ dispatch_pattern_tests:
     /*
      * Fill loop skeleton:
      *   ptr = chunk; end = chunk + 8192; word_index = base_word_index;
-     *   while (ptr != end) { *ptr = pattern(test_id, pass, word_index, seed); ptr++; word_index++; }
+     *   while (ptr != end) { 
+     *     *ptr = pattern(test_id, pass, word_index, seed); 
+     *     ptr++; word_index++; 
+     *   }
      */
     move    $t0, $a0
     addiu   $t1, $a0, 8192
@@ -154,131 +142,9 @@ pattern_fill_loop:
     beq     $t0, $t1, pattern_verify_setup
     nop
 
-    /* ---------- memtest_pattern_word switch(test_id) ---------- */
-    beq     $t8, $zero, pattern_case_random_fill
+    /* pattern = pattern_word_compute(test_id, pass, word_index, seed); */
+    jal     pattern_word_compute
     nop
-    li      $t5, 1
-    beq     $t8, $t5, pattern_case_checker_fill
-    nop
-    li      $t5, 2
-    beq     $t8, $t5, pattern_case_solid_fill
-    nop
-    li      $t5, 3
-    beq     $t8, $t5, pattern_case_walk1_fill
-    nop
-    li      $t5, 4
-    beq     $t8, $t5, pattern_case_walk0_fill
-    nop
-    li      $t5, 5
-    beq     $t8, $t5, pattern_case_seqinc_fill
-    nop
-    li      $t5, 6
-    beq     $t8, $t5, pattern_case_bitspread_fill
-    nop
-    li      $t5, 7
-    beq     $t8, $t5, pattern_case_bitflip_fill
-    nop
-
-    /* default pattern = 0 */
-    move    $t4, $zero
-    b       pattern_store_fill
-    nop
-
-pattern_case_random_fill:
-    /* x = seed ^ pass_mix ^ word_index; x = mix32(x) */
-    xor     $t4, $a2, $t9
-    xor     $t4, $t4, $t2
-    srl     $t5, $t4, 16
-    xor     $t4, $t4, $t5
-    li      $t5, 0x7FEB352D
-    multu   $t4, $t5
-    mflo    $t4
-    srl     $t5, $t4, 15
-    xor     $t4, $t4, $t5
-    li      $t5, 0x846CA68B
-    multu   $t4, $t5
-    mflo    $t4
-    srl     $t5, $t4, 16
-    xor     $t4, $t4, $t5
-    b       pattern_store_fill
-    nop
-
-pattern_case_checker_fill:
-    addu    $t5, $t2, $t6
-    andi    $t5, $t5, 1
-    beq     $t5, $zero, pattern_checker_even_fill
-    nop
-    li      $t4, 0xAAAAAAAA
-    b       pattern_store_fill
-    nop
-pattern_checker_even_fill:
-    li      $t4, 0x55555555
-    b       pattern_store_fill
-    nop
-
-pattern_case_solid_fill:
-    andi    $t5, $t6, 1
-    beq     $t5, $zero, pattern_solid_zero_fill
-    nop
-    li      $t4, 0xFFFFFFFF
-    b       pattern_store_fill
-    nop
-pattern_solid_zero_fill:
-    move    $t4, $zero
-    b       pattern_store_fill
-    nop
-
-pattern_case_walk1_fill:
-    addu    $t5, $t2, $t6
-    andi    $t5, $t5, 31
-    li      $t4, 1
-    sllv    $t4, $t4, $t5
-    b       pattern_store_fill
-    nop
-
-pattern_case_walk0_fill:
-    addu    $t5, $t2, $t6
-    andi    $t5, $t5, 31
-    li      $t4, 1
-    sllv    $t4, $t4, $t5
-    nor     $t4, $t4, $zero
-    b       pattern_store_fill
-    nop
-
-pattern_case_seqinc_fill:
-    li      $t5, 0x01010101
-    multu   $t6, $t5
-    mflo    $t5
-    addu    $t4, $t2, $t5
-    b       pattern_store_fill
-    nop
-
-pattern_case_bitspread_fill:
-    andi    $t5, $t6, 15
-    li      $t4, 1
-    sllv    $t4, $t4, $t5
-    addiu   $v1, $t5, 16
-    li      $t5, 1
-    sllv    $t5, $t5, $v1
-    or      $t4, $t4, $t5
-    andi    $t5, $t2, 1
-    beq     $t5, $zero, pattern_store_fill
-    nop
-    nor     $t4, $t4, $zero
-    b       pattern_store_fill
-    nop
-
-pattern_case_bitflip_fill:
-    andi    $t5, $t6, 31
-    li      $t4, 1
-    sllv    $t4, $t4, $t5
-    addu    $t5, $t2, $t6
-    andi    $t5, $t5, 1
-    beq     $t5, $zero, pattern_store_fill
-    nop
-    nor     $t4, $t4, $zero
-
-pattern_store_fill:
     sw      $t4, 0x0000($t0)
     addiu   $t0, $t0, 4
     addiu   $t2, $t2, 1
@@ -304,36 +170,63 @@ pattern_verify_loop:
     beq     $t0, $t1, phase_restore_dma
     nop
 
-    beq     $t8, $zero, pattern_case_random_verify
+    /* expected = pattern_word_compute(test_id, pass, word_index, seed); */
+    jal     pattern_word_compute
+    nop
+    lw      $t5, 0x0000($t0)
+    beq     $t5, $t4, pattern_verify_next
+    nop
+    b       record_fail_and_restore
+    nop
+
+pattern_verify_next:
+    addiu   $t0, $t0, 4
+    addiu   $t2, $t2, 1
+    b       pattern_verify_loop
+    nop
+
+/*
+ * pattern_word_compute
+ * Input:
+ *   reg_test_id = test id
+ *   reg_pass    = pass
+ *   $t2         = word index
+ *   arg_seed    = seed
+ *   reg_pass_mix= pass * 0x9e3779b9
+ * Output:
+ *   $t4         = pattern word
+ */
+pattern_word_compute:
+    beq     reg_test_id, $zero, pcase_random
     nop
     li      $t5, 1
-    beq     $t8, $t5, pattern_case_checker_verify
+    beq     reg_test_id, $t5, pcase_checker
     nop
     li      $t5, 2
-    beq     $t8, $t5, pattern_case_solid_verify
+    beq     reg_test_id, $t5, pcase_solid
     nop
     li      $t5, 3
-    beq     $t8, $t5, pattern_case_walk1_verify
+    beq     reg_test_id, $t5, pcase_walk1
     nop
     li      $t5, 4
-    beq     $t8, $t5, pattern_case_walk0_verify
+    beq     reg_test_id, $t5, pcase_walk0
     nop
     li      $t5, 5
-    beq     $t8, $t5, pattern_case_seqinc_verify
+    beq     reg_test_id, $t5, pcase_seqinc
     nop
     li      $t5, 6
-    beq     $t8, $t5, pattern_case_bitspread_verify
+    beq     reg_test_id, $t5, pcase_bitspread
     nop
     li      $t5, 7
-    beq     $t8, $t5, pattern_case_bitflip_verify
+    beq     reg_test_id, $t5, pcase_bitflip
     nop
-
     move    $t4, $zero
-    b       pattern_compare_verify
+    jr      $ra
     nop
 
-pattern_case_random_verify:
-    xor     $t4, $a2, $t9
+pcase_random:
+    /* x = seed ^ pass_mix ^ word_index; x = mix32(x); */
+    xor     $t4, arg_seed, reg_pass_mix
     xor     $t4, $t4, $t2
     srl     $t5, $t4, 16
     xor     $t4, $t4, $t5
@@ -347,95 +240,93 @@ pattern_case_random_verify:
     mflo    $t4
     srl     $t5, $t4, 16
     xor     $t4, $t4, $t5
-    b       pattern_compare_verify
+    jr      $ra
     nop
 
-pattern_case_checker_verify:
-    addu    $t5, $t2, $t6
+pcase_checker:
+    /* pattern = ((word_index + pass) & 1) ? 0xAAAAAAAA : 0x55555555; */
+    addu    $t5, $t2, reg_pass
     andi    $t5, $t5, 1
-    beq     $t5, $zero, pattern_checker_even_verify
+    bnez    $t5, pcase_checker_odd
     nop
-    li      $t4, 0xAAAAAAAA
-    b       pattern_compare_verify
-    nop
-pattern_checker_even_verify:
     li      $t4, 0x55555555
-    b       pattern_compare_verify
+    jr      $ra
+    nop
+pcase_checker_odd:
+    li      $t4, 0xAAAAAAAA
+    jr      $ra
     nop
 
-pattern_case_solid_verify:
-    andi    $t5, $t6, 1
-    beq     $t5, $zero, pattern_solid_zero_verify
+pcase_solid:
+    /* pattern = (pass & 1) ? 0xFFFFFFFF : 0x00000000; */
+    andi    $t5, reg_pass, 1
+    beqz    $t5, pcase_solid_zero
     nop
     li      $t4, 0xFFFFFFFF
-    b       pattern_compare_verify
+    jr      $ra
     nop
-pattern_solid_zero_verify:
+pcase_solid_zero:
     move    $t4, $zero
-    b       pattern_compare_verify
+    jr      $ra
     nop
 
-pattern_case_walk1_verify:
-    addu    $t5, $t2, $t6
+pcase_walk1:
+    /* pattern = 1U << ((word_index + pass) & 31); */
+    addu    $t5, $t2, reg_pass
     andi    $t5, $t5, 31
     li      $t4, 1
     sllv    $t4, $t4, $t5
-    b       pattern_compare_verify
+    jr      $ra
     nop
 
-pattern_case_walk0_verify:
-    addu    $t5, $t2, $t6
+pcase_walk0:
+    /* pattern = ~(1U << ((word_index + pass) & 31)); */
+    addu    $t5, $t2, reg_pass
     andi    $t5, $t5, 31
     li      $t4, 1
     sllv    $t4, $t4, $t5
     nor     $t4, $t4, $zero
-    b       pattern_compare_verify
+    jr      $ra
     nop
 
-pattern_case_seqinc_verify:
+pcase_seqinc:
+    /* pattern = word_index + (pass * 0x01010101U); */
     li      $t5, 0x01010101
-    multu   $t6, $t5
+    multu   reg_pass, $t5
     mflo    $t5
     addu    $t4, $t2, $t5
-    b       pattern_compare_verify
+    jr      $ra
     nop
 
-pattern_case_bitspread_verify:
-    andi    $t5, $t6, 15
+pcase_bitspread:
+    /* pos = pass & 15; pat = (1<<pos) | (1<<(pos+16)); pattern = (word_index & 1) ? ~pat : pat; */
+    andi    $t5, reg_pass, 15
     li      $t4, 1
     sllv    $t4, $t4, $t5
-    addiu   $v1, $t5, 16
+    addiu   $a3, $t5, 16
     li      $t5, 1
-    sllv    $t5, $t5, $v1
+    sllv    $t5, $t5, $a3
     or      $t4, $t4, $t5
     andi    $t5, $t2, 1
-    beq     $t5, $zero, pattern_compare_verify
+    beqz    $t5, pcase_bitspread_done
     nop
     nor     $t4, $t4, $zero
-    b       pattern_compare_verify
+pcase_bitspread_done:
+    jr      $ra
     nop
 
-pattern_case_bitflip_verify:
-    andi    $t5, $t6, 31
+pcase_bitflip:
+    /* pos = pass & 31; base = 1<<pos; pattern = ((word_index + pass) & 1) ? ~base : base; */
+    andi    $t5, reg_pass, 31
     li      $t4, 1
     sllv    $t4, $t4, $t5
-    addu    $t5, $t2, $t6
+    addu    $t5, $t2, reg_pass
     andi    $t5, $t5, 1
-    beq     $t5, $zero, pattern_compare_verify
+    beqz    $t5, pcase_bitflip_done
     nop
     nor     $t4, $t4, $zero
-
-pattern_compare_verify:
-    lw      $t5, 0x0000($t0)
-    beq     $t5, $t4, pattern_verify_next
-    nop
-    b       record_fail_and_restore
-    nop
-
-pattern_verify_next:
-    addiu   $t0, $t0, 4
-    addiu   $t2, $t2, 1
-    b       pattern_verify_loop
+pcase_bitflip_done:
+    jr      $ra
     nop
 
 /* ---------------------------------------------------------------------- */
@@ -1314,37 +1205,21 @@ phase_restore_dma:
     /* Re-use SP DMA register block for the restore direction (WRLEN). */
     li      reg_sp_base, 0xA4040000
 
-wait_dma_idle_before_restore_dmem:
-    lw      $t5, 0x0010(reg_sp_base)
-    andi    $t5, $t5, 0x000C
-    bnez    $t5, wait_dma_idle_before_restore_dmem
+    jal     sp_dma_wait
     nop
 
     /* DMA OUT: SP DMEM[0..4095] -> DRAM chunk[0..4095] */
-    sw      arg_chunk, 0x0004(reg_sp_base)
-    move    $t5, $zero
-    sw      $t5, 0x0000(reg_sp_base)
-    li      $t5, 4095
-    sw      $t5, 0x000C(reg_sp_base)
-
-wait_dma_done_restore_dmem:
-    lw      $t5, 0x0010(reg_sp_base)
-    andi    $t5, $t5, 0x000C
-    bnez    $t5, wait_dma_done_restore_dmem
+    move    $t0, arg_chunk
+    move    $t1, $zero
+    li      $t2, 4095
+    jal     sp_dma_write
     nop
 
     /* DMA OUT: SP IMEM[0..4095] -> DRAM chunk[4096..8191] */
-    addiu   $t5, arg_chunk, 4096
-    sw      $t5, 0x0004(reg_sp_base)
-    li      $t5, 4096
-    sw      $t5, 0x0000(reg_sp_base)
-    li      $t5, 4095
-    sw      $t5, 0x000C(reg_sp_base)
-
-wait_dma_done_restore_imem:
-    lw      $t5, 0x0010(reg_sp_base)
-    andi    $t5, $t5, 0x000C
-    bnez    $t5, wait_dma_done_restore_imem
+    addiu   $t0, arg_chunk, 4096
+    li      $t1, 4096
+    li      $t2, 4095
+    jal     sp_dma_write
     nop
 
     /* ---------- PHASE 4: Verify restored data against SP memories ---------- */
@@ -1354,54 +1229,98 @@ wait_dma_done_restore_imem:
      *
      * Any mismatch here means restore integrity failed.
      */
-#define restore_ptr             $t0
-#define restore_end             $t1
-#define restore_sp_ptr          $t2
-    move    restore_ptr, arg_chunk
-    addiu   restore_end, arg_chunk, 4096
-    li      restore_sp_ptr, 0xA4000000
-
-verify_restored_dmem_loop:
-    beq     restore_ptr, restore_end, verify_restored_imem_setup
-    nop
-    lw      $t4, 0(restore_ptr)
-    lw      $t5, 0(restore_sp_ptr)
-    beq     $t4, $t5, verify_restored_dmem_next
-    nop
-    bnez    ret_fail_addr, verify_restored_dmem_next
-    nop
-    move    ret_fail_addr, restore_ptr
-verify_restored_dmem_next:
-    addiu   restore_ptr, restore_ptr, 4
-    addiu   restore_sp_ptr, restore_sp_ptr, 4
-    b       verify_restored_dmem_loop
+    move    $t0, arg_chunk
+    addiu   $t1, arg_chunk, 4096
+    li      $t2, 0xA4000000
+    jal     compare_region_with_sp
     nop
 
-verify_restored_imem_setup:
-    addiu   restore_ptr, arg_chunk, 4096
-    addiu   restore_end, arg_chunk, 8192
-    li      restore_sp_ptr, 0xA4001000
-
-verify_restored_imem_loop:
-    beq     restore_ptr, restore_end, function_epilogue
+    addiu   $t0, arg_chunk, 4096
+    addiu   $t1, arg_chunk, 8192
+    li      $t2, 0xA4001000
+    jal     compare_region_with_sp
     nop
-    lw      $t4, 0(restore_ptr)
-    lw      $t5, 0(restore_sp_ptr)
-    beq     $t4, $t5, verify_restored_imem_next
-    nop
-    bnez    ret_fail_addr, verify_restored_imem_next
-    nop
-    move    ret_fail_addr, restore_ptr
-verify_restored_imem_next:
-    addiu   restore_ptr, restore_ptr, 4
-    addiu   restore_sp_ptr, restore_sp_ptr, 4
-    b       verify_restored_imem_loop
-    nop
-#undef restore_ptr
-#undef restore_end
-#undef restore_sp_ptr
 
 function_epilogue:
+    jr      ra2
+    nop
+
+/*
+ * Leaf helper: wait until SP DMA/IO are idle.
+ */
+sp_dma_wait:
+sp_dma_wait_loop:
+    lw      $t5, 0x0010(reg_sp_base)
+    andi    $t5, $t5, 0x000C
+    bnez    $t5, sp_dma_wait_loop
+    nop
+    jr      $ra
+    nop
+
+/*
+ * Leaf helper: DMA from DRAM -> SP memory.
+ * Input:
+ *   t0 = dram address
+ *   t1 = sp address (0=DMEM, 4096=IMEM)
+ *   t2 = length-1
+ */
+sp_dma_read:
+    sw      $t0, 0x0004(reg_sp_base)
+    sw      $t1, 0x0000(reg_sp_base)
+    sw      $t2, 0x0008(reg_sp_base)
+sp_dma_read_wait_loop:
+    lw      $t5, 0x0010(reg_sp_base)
+    andi    $t5, $t5, 0x000C
+    bnez    $t5, sp_dma_read_wait_loop
+    nop
+    jr      $ra
+    nop
+
+/*
+ * Leaf helper: DMA from SP memory -> DRAM.
+ * Input:
+ *   t0 = dram address
+ *   t1 = sp address (0=DMEM, 4096=IMEM)
+ *   t2 = length-1
+ */
+sp_dma_write:
+    sw      $t0, 0x0004(reg_sp_base)
+    sw      $t1, 0x0000(reg_sp_base)
+    sw      $t2, 0x000C(reg_sp_base)
+sp_dma_write_wait_loop:
+    lw      $t5, 0x0010(reg_sp_base)
+    andi    $t5, $t5, 0x000C
+    bnez    $t5, sp_dma_write_wait_loop
+    nop
+    jr      $ra
+    nop
+
+/*
+ * Leaf helper: compare [t0, t1) against SP mirror starting at t2.
+ * Input:
+ *   t0 = chunk pointer start
+ *   t1 = chunk pointer end (exclusive)
+ *   t2 = SP mirror pointer start
+ * Side effects:
+ *   if first mismatch is found and ret_fail_addr == 0, stores pointer in ret_fail_addr.
+ */
+compare_region_with_sp:
+compare_region_with_sp_loop:
+    beq     $t0, $t1, compare_region_with_sp_done
+    nop
+    lw      $t4, 0($t0)
+    lw      $t5, 0($t2)
+    beq     $t4, $t5, compare_region_with_sp_next
+    nop
+    bnez    ret_fail_addr, compare_region_with_sp_next
+    nop
+    move    ret_fail_addr, $t0
+compare_region_with_sp_next:
+    addiu   $t0, $t0, 4
+    addiu   $t2, $t2, 4
+    b       compare_region_with_sp_loop
+    nop
+compare_region_with_sp_done:
     jr      $ra
     nop
 
