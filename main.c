@@ -18,8 +18,17 @@ void snake_render(surface_t *disp, bool has_progress, uint32_t progress_pct, uin
 #define UI_X_PADDING 8
 #define UI_Y_PADDING 8
 #define FAILURE_LOG_CAP 12
+#define FRAMEBUFFER_WIDTH 440
+#define FRAMEBUFFER_HEIGHT 240
+#define FRAMEBUFFER_COUNT 2
+#define FRAMEBUFFER0_PHYS (2U * 1024U * 1024U)
+#define FRAMEBUFFER1_PHYS (3U * 1024U * 1024U)
+#define FRAMEBUFFER_SIZE_BYTES (FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * 2U)
 #ifndef MEMTEST_CHUNKS_PER_FRAME
 #define MEMTEST_CHUNKS_PER_FRAME 32
+#endif
+#if (FRAMEBUFFER_SIZE_BYTES > BANK_SIZE_BYTES)
+#error "Framebuffer must fit in one memory bank"
 #endif
 
 typedef enum {
@@ -76,8 +85,84 @@ static uint32_t g_last_logged_pass = UINT32_MAX;
 static bool g_summary_logged = false;
 
 static ui_palette_t g_pal;
+typedef struct {
+    surface_t surf;
+    phys_addr_t phys;
+} fixed_fb_t;
+static fixed_fb_t g_framebuffers[FRAMEBUFFER_COUNT];
+static int g_active_fb;
+static int g_pending_fb;
 
 static inline int min_int(int a, int b) { return a < b ? a : b; }
+static int find_next_enabled_bank(int start);
+static bool work_item_valid(void);
+static inline bool ranges_overlap_u32(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1)
+{
+    return a0 < b1 && b0 < a1;
+}
+
+static void video_init_fixed_buffers(void)
+{
+    const phys_addr_t fb_phys[FRAMEBUFFER_COUNT] = {
+        (phys_addr_t)FRAMEBUFFER0_PHYS,
+        (phys_addr_t)FRAMEBUFFER1_PHYS,
+    };
+    int i;
+
+    assertf(g_total_memory_bytes >= (int)(FRAMEBUFFER0_PHYS + FRAMEBUFFER_SIZE_BYTES),
+            "Framebuffer 0 out of RDRAM bounds");
+    assertf(g_total_memory_bytes >= (int)(FRAMEBUFFER1_PHYS + FRAMEBUFFER_SIZE_BYTES),
+            "Framebuffer 1 out of RDRAM bounds");
+    assertf((FRAMEBUFFER0_PHYS / BANK_SIZE_BYTES) != (FRAMEBUFFER1_PHYS / BANK_SIZE_BYTES),
+            "Framebuffers must live in different memory banks");
+
+    vi_init();
+    vi_write_begin();
+    vi_reset();
+        vi_set_interlaced(false);
+        vi_set_gamma(VI_GAMMA_DISABLE);
+        vi_set_aa_mode(VI_AA_MODE_RESAMPLE);
+        vi_set_divot(false);
+        vi_set_dedither(false);
+        vi_set_borders(vi_calc_borders(4.0f / 3.0f, VI_CRT_MARGIN));
+    vi_write_end();
+
+    for (i = 0; i < FRAMEBUFFER_COUNT; i++) {
+        g_framebuffers[i].phys = fb_phys[i];
+        g_framebuffers[i].surf = surface_make_linear(
+            VirtualUncachedAddr(fb_phys[i]),
+            FMT_RGBA16,
+            FRAMEBUFFER_WIDTH,
+            FRAMEBUFFER_HEIGHT
+        );
+        graphics_fill_screen(&g_framebuffers[i].surf, 0);
+    }
+
+    g_active_fb = 0;
+    g_pending_fb = 0;
+    vi_show(&g_framebuffers[g_active_fb].surf);
+}
+
+static bool framebuffer_overlaps_upcoming_slices(int fb_idx)
+{
+    if (!(g_run_state == RUN_RUNNING || g_run_state == RUN_STOPPING)) return false;
+    if (!work_item_valid()) return false;
+
+    uint32_t fb_begin = (uint32_t)g_framebuffers[fb_idx].phys;
+    uint32_t fb_end = fb_begin + FRAMEBUFFER_SIZE_BYTES;
+    uint32_t next_begin = (uint32_t)((uint32_t)g_current_bank * BANK_SIZE_BYTES + g_current_bank_offset);
+    uint32_t next_end = next_begin + (MEMTEST_CHUNKS_PER_FRAME * CHUNK_SIZE_BYTES);
+    return ranges_overlap_u32(next_begin, next_end, fb_begin, fb_end);
+}
+
+static int select_safe_framebuffer(void)
+{
+    int next_fb = g_active_fb ^ 1;
+    if (framebuffer_overlaps_upcoming_slices(next_fb)) {
+        return g_active_fb;
+    }
+    return next_fb;
+}
 
 static bool any_bank_enabled(void)
 {
@@ -443,12 +528,12 @@ static void render_setup_screen(surface_t *disp)
 {
     char line[96];
     int y = UI_Y_PADDING + 12;
-    int screen_w = display_get_width();
+    int screen_w = FRAMEBUFFER_WIDTH;
     int col_left = UI_X_PADDING;
     int col_right = screen_w / 2 + 4;
     int left_w = col_right - col_left - 6;
     int right_w = screen_w - col_right - UI_X_PADDING + 2;
-    int footer_y = display_get_height() - 12;
+    int footer_y = FRAMEBUFFER_HEIGHT - 12;
     int tests_y_start = UI_Y_PADDING + 12 + (UI_LINE_HEIGHT * 5) + 4;
     int tests_rows_visible = (footer_y - tests_y_start) / UI_LINE_HEIGHT;
     int tests_first = 0;
@@ -513,7 +598,7 @@ static void render_running_screen(surface_t *disp)
     bool has_progress = total_progress_percent(&progress_pct);
     uint32_t state_color = (g_run_state == RUN_PAUSED) ? g_pal.warn : g_pal.ok;
     int left = UI_X_PADDING;
-    int right = display_get_width() / 2 + 24;
+    int right = FRAMEBUFFER_WIDTH / 2 + 24;
 
     graphics_set_color(state_color, g_pal.panel);
     snprintf(line, sizeof(line), "State: %s", run_state_name(g_run_state));
@@ -614,7 +699,7 @@ static void render_report_screen(surface_t *disp)
 static void render_footer(surface_t *disp)
 {
     const char *left_hint = "";
-    int footer_y = display_get_height() - 12;
+    int footer_y = FRAMEBUFFER_HEIGHT - 12;
 
     if (g_run_state == RUN_IDLE) {
         left_hint = "A: toggle   C-L/R/U: quick/full/burn   Start: run";
@@ -625,7 +710,7 @@ static void render_footer(surface_t *disp)
         left_hint = "A: setup   Start: rerun";
     }
 
-    graphics_draw_box(disp, 0, footer_y - 5, display_get_width(), footer_y+5, g_pal.accent);
+    graphics_draw_box(disp, 0, footer_y - 5, FRAMEBUFFER_WIDTH, footer_y+5, g_pal.accent);
     graphics_set_color(g_pal.bg, g_pal.accent);
     graphics_draw_text(disp, UI_X_PADDING, footer_y, left_hint);
 }
@@ -636,7 +721,7 @@ static void render_frame(surface_t *disp)
     int topbar_h = 15;
     graphics_fill_screen(disp, g_pal.panel);
 
-    graphics_draw_box(disp, 0, 0, display_get_width(), topbar_h, g_pal.accent);
+    graphics_draw_box(disp, 0, 0, FRAMEBUFFER_WIDTH, topbar_h, g_pal.accent);
     graphics_set_color(g_pal.bg, g_pal.accent);
     graphics_draw_text(disp, UI_X_PADDING, 3, title);
 
@@ -661,7 +746,7 @@ static void render_frame(surface_t *disp)
             analog_x = inputs.cstick_x;
             analog_y = inputs.cstick_y;
         }
-        logo_draw(disp, display_get_width() - 60, 78, logo_color, (uint32_t)get_ticks_ms(), analog_x, analog_y);
+        logo_draw(disp, FRAMEBUFFER_WIDTH - 60, 78, logo_color, (uint32_t)get_ticks_ms(), analog_x, analog_y);
     }
 
     render_footer(disp);
@@ -757,15 +842,13 @@ int main(void)
 
     debug_init_emulog();
     debug_init_usblog();
-    display_init((resolution_t){
-        .width = 440, .height = 240, .overscan_margin = VI_CRT_MARGIN
-    }, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_RESAMPLE);
     joypad_init();
     rsp_init();
     joypad_poll();
 
-    init_palette();
     g_total_memory_bytes = get_memory_size();
+    video_init_fixed_buffers();
+    init_palette();
     g_total_banks = min_int(g_total_memory_bytes / (int)BANK_SIZE_BYTES, MAX_BANKS);
     g_usable_banks = g_total_banks;
     g_loop_target = 1;
@@ -787,6 +870,9 @@ int main(void)
 
     while (1) {
         joypad_buttons_t pressed;
+        int draw_fb;
+        bool tests_executing;
+        g_active_fb = g_pending_fb;
         joypad_poll();
         pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
 
@@ -795,11 +881,21 @@ int main(void)
         else handle_report_input(pressed);
         if (!(g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING)) snake_stop();
 
-        disp = display_get();
+        draw_fb = select_safe_framebuffer();
+        tests_executing = (g_run_state == RUN_RUNNING || g_run_state == RUN_STOPPING);
+        if (!tests_executing || draw_fb == g_active_fb) {
+            /*
+             * Outside test execution we always pace on vblank.
+             * While tests are running, wait only if redrawing on active FB.
+             */
+            vi_wait_vblank();
+        }
+        disp = &g_framebuffers[draw_fb].surf;
         render_frame(disp);
-        display_show(disp);
+        vi_show(disp);
+        g_pending_fb = draw_fb;
 
-        if (g_run_state == RUN_RUNNING || g_run_state == RUN_STOPPING) {
+        if (tests_executing) {
             uint32_t chunks_this_frame;
             for (chunks_this_frame = 0; chunks_this_frame < MEMTEST_CHUNKS_PER_FRAME; chunks_this_frame++) {
                 if (!(g_run_state == RUN_RUNNING || g_run_state == RUN_STOPPING)) break;

@@ -252,8 +252,8 @@ void snake_render(surface_t *d, bool has_progress, uint32_t progress_pct, uint32
 
     if (s_dead && s_dead_us && (now - s_dead_us) >= S_GAME_OVER_DELAY_US) {
         const char *msg = "GAME OVER";
-        int x = display_get_width() / 2 - (9 * 8) / 2;
-        int y = display_get_height() / 2 - 4;
+        int x = d->width / 2 - (9 * 8) / 2;
+        int y = d->height / 2 - 4;
         graphics_set_color(c_go, c_bg);
         graphics_draw_text(d, x, y, msg);
     }
