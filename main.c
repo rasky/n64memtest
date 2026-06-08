@@ -8,6 +8,11 @@
 
 #include "mem_test_engine.h"
 #include "logo.h"
+bool snake_is_active(void);
+void snake_stop(void);
+void snake_toggle(void);
+void snake_handle_input(joypad_buttons_t pressed);
+void snake_render(surface_t *disp, bool has_progress, uint32_t progress_pct, uint32_t errors);
 
 #define UI_LINE_HEIGHT 10
 #define UI_X_PADDING 8
@@ -614,7 +619,8 @@ static void render_footer(surface_t *disp)
     if (g_run_state == RUN_IDLE) {
         left_hint = "A: toggle   C-L/R/U: quick/full/burn   Start: run";
     } else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) {
-        left_hint = "B: stop    Start: pause/resume";
+        left_hint = snake_is_active() ? "D-pad: move    Z: exit snake"
+                                      : "B: stop    Start: pause/resume    Z: snake";
     } else {
         left_hint = "A: setup   Start: rerun";
     }
@@ -626,7 +632,7 @@ static void render_footer(surface_t *disp)
 
 static void render_frame(surface_t *disp)
 {
-    const char *title = "N64Memtest 0.8 - by Rasky with Libdragon";
+    const char *title = "N64Memtest 0.9 - by Rasky with Libdragon";
     int topbar_h = 15;
     graphics_fill_screen(disp, g_pal.panel);
 
@@ -635,10 +641,17 @@ static void render_frame(surface_t *disp)
     graphics_draw_text(disp, UI_X_PADDING, 3, title);
 
     if (g_run_state == RUN_IDLE) render_setup_screen(disp);
-    else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) render_running_screen(disp);
-    else render_report_screen(disp);
+    else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) {
+        if (snake_is_active()) {
+            uint32_t progress_pct = 0;
+            bool has_progress = total_progress_percent(&progress_pct);
+            snake_render(disp, has_progress, progress_pct, g_error_count);
+        } else {
+            render_running_screen(disp);
+        }
+    } else render_report_screen(disp);
 
-    if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) {
+    if ((g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) && !snake_is_active()) {
         joypad_inputs_t inputs = joypad_get_inputs(JOYPAD_PORT_1);
         int analog_x = inputs.stick_x;
         int analog_y = inputs.stick_y;
@@ -657,6 +670,7 @@ static void render_frame(surface_t *disp)
 static void start_run(void)
 {
     if (!any_bank_enabled() || !any_test_enabled()) return;
+    snake_stop();
     reset_runtime_counters();
     prepare_first_work_item();
     if (!work_item_valid()) return;
@@ -713,11 +727,17 @@ static void handle_setup_input(joypad_buttons_t pressed)
 
 static void handle_running_input(joypad_buttons_t pressed)
 {
-    if (pressed.start) {
-        if (g_run_state == RUN_RUNNING) g_run_state = RUN_PAUSED;
-        else if (g_run_state == RUN_PAUSED) g_run_state = RUN_RUNNING;
+    if (pressed.z) snake_toggle();
+    if (snake_is_active()) {
+        snake_handle_input(pressed);
+    } else if (pressed.start) {
+        if (g_run_state == RUN_RUNNING) {
+            g_run_state = RUN_PAUSED;
+        } else if (g_run_state == RUN_PAUSED) {
+            g_run_state = RUN_RUNNING;
+        }
     }
-    if (pressed.b && g_run_state != RUN_DONE) {
+    if (!snake_is_active() && pressed.b && g_run_state != RUN_DONE) {
         g_stop_requested = true;
         if (g_run_state == RUN_RUNNING) g_run_state = RUN_STOPPING;
     }
@@ -773,6 +793,7 @@ int main(void)
         if (g_run_state == RUN_IDLE) handle_setup_input(pressed);
         else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) handle_running_input(pressed);
         else handle_report_input(pressed);
+        if (!(g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING)) snake_stop();
 
         disp = display_get();
         render_frame(disp);
