@@ -7,20 +7,20 @@
 #include <string.h>
 
 #include "mem_tests.h"
+#include "logo.h"
 
 #define UI_LINE_HEIGHT 10
 #define UI_X_PADDING 8
 #define UI_Y_PADDING 8
 #define FAILURE_LOG_CAP 12
-#define MOVING_STACK_SIZE 8192U
 #ifndef MEMTEST_CHUNKS_PER_FRAME
-#define MEMTEST_CHUNKS_PER_FRAME 128
+#define MEMTEST_CHUNKS_PER_FRAME 32
 #endif
 
 typedef enum {
-    SETUP_ROW_PROFILE = 0,
+    SETUP_ROW_START = 0,
+    SETUP_ROW_PROFILE,
     SETUP_ROW_LOOPS,
-    SETUP_ROW_START,
     SETUP_ROW_BANK_BASE,
 } setup_row_t;
 
@@ -66,8 +66,6 @@ mem_failure_t g_last_failure;
 mem_failure_t g_failure_log[FAILURE_LOG_CAP];
 uint32_t g_failure_log_head;
 uint32_t g_failure_log_count;
-void *g_moving_stack_buffer;
-uint32_t g_moving_stack_size;
 static int g_last_logged_test = -1;
 static uint32_t g_last_logged_pass = UINT32_MAX;
 static bool g_summary_logged = false;
@@ -466,6 +464,10 @@ static void render_setup_screen(surface_t *disp)
     tests_last = tests_first + tests_rows_visible;
     if (tests_last > MEMTEST_ID_COUNT) tests_last = MEMTEST_ID_COUNT;
 
+    snprintf(line, sizeof(line), "Start test run");
+    draw_row(disp, col_left, left_w, y, g_setup_cursor == row++, g_pal.ok, line);
+    y += UI_LINE_HEIGHT;
+
     snprintf(line, sizeof(line), "Profile: %s", memtest_profile_name(g_profile));
     draw_row(disp, col_left, left_w, y, g_setup_cursor == row++, g_pal.fg, line);
     y += UI_LINE_HEIGHT;
@@ -474,16 +476,14 @@ static void render_setup_screen(surface_t *disp)
     draw_row(disp, col_left, left_w, y, g_setup_cursor == row++, g_pal.fg, line);
     y += UI_LINE_HEIGHT;
 
-    snprintf(line, sizeof(line), "Start test run");
-    draw_row(disp, col_left, left_w, y, g_setup_cursor == row++, g_pal.ok, line);
-    y += UI_LINE_HEIGHT + 4;
+    y += 4;
 
     graphics_set_color(g_pal.muted, g_pal.panel);
     graphics_draw_text(disp, col_left, y, "Banks (1MiB):");
     snprintf(line, sizeof(line), "Tests %d-%d/%d:", tests_first + 1, tests_last, MEMTEST_ID_COUNT);
     graphics_draw_text(disp, col_right, y, line);
 
-    y += UI_LINE_HEIGHT;
+    y = tests_y_start;
     for (i = 0; i < g_total_banks; i++) {
         const char *status = g_bank_available[i] ? (g_bank_enabled[i] ? "ON " : "OFF") : "N/A";
         snprintf(line, sizeof(line), "Bank %d: %s", i, status);
@@ -508,13 +508,13 @@ static void render_running_screen(surface_t *disp)
     bool has_progress = total_progress_percent(&progress_pct);
     uint32_t state_color = (g_run_state == RUN_PAUSED) ? g_pal.warn : g_pal.ok;
     int left = UI_X_PADDING;
-    int right = display_get_width() / 2 + 6;
+    int right = display_get_width() / 2 + 24;
 
-    graphics_set_color(g_pal.fg, g_pal.panel);
+    graphics_set_color(state_color, g_pal.panel);
     snprintf(line, sizeof(line), "State: %s", run_state_name(g_run_state));
     graphics_draw_text(disp, left, UI_Y_PADDING + 12, line);
 
-    graphics_set_color(state_color, g_pal.panel);
+    graphics_set_color(g_pal.fg, g_pal.panel);
     snprintf(line, sizeof(line), "Loop: %lu / %s", (unsigned long)(g_loop_completed + 1), loop_target_name(g_loop_target));
     graphics_draw_text(disp, left, UI_Y_PADDING + 24, line);
 
@@ -534,18 +534,18 @@ static void render_running_screen(surface_t *disp)
     graphics_draw_text(disp, left, UI_Y_PADDING + 60, line);
 
     graphics_set_color(g_pal.muted, g_pal.panel);
-    graphics_draw_text(disp, left, UI_Y_PADDING + 78, "Errors");
+    graphics_draw_text(disp, right, UI_Y_PADDING + 12, "Errors");
 
     graphics_set_color(g_error_count ? g_pal.fail : g_pal.ok, g_pal.panel);
     snprintf(line, sizeof(line), "Err: %lu  Restore: %lu",
              (unsigned long)g_error_count, (unsigned long)g_restore_error_count);
-    graphics_draw_text(disp, left, UI_Y_PADDING + 90, line);
+    graphics_draw_text(disp, right, UI_Y_PADDING + 24, line);
 
     if (g_failure_log_count > 0) {
         uint32_t shown = 0;
         uint32_t idx = g_failure_log_head;
         graphics_set_color(g_pal.muted, g_pal.panel);
-        graphics_draw_text(disp, right, UI_Y_PADDING + 12, "Latest fails");
+        graphics_draw_text(disp, left, UI_Y_PADDING + 78, "Latest fails");
         graphics_set_color(g_pal.fail, g_pal.panel);
         while (shown < g_failure_log_count && shown < 8) {
             const mem_failure_t *entry;
@@ -559,12 +559,12 @@ static void render_running_screen(surface_t *disp)
                      (unsigned long)entry->address,
                      (unsigned long)entry->expected,
                      (unsigned long)entry->actual);
-            graphics_draw_text(disp, right, UI_Y_PADDING + 24 + (int)(shown * UI_LINE_HEIGHT), line);
+            graphics_draw_text(disp, left, UI_Y_PADDING + 90 + (int)(shown * UI_LINE_HEIGHT), line);
             shown++;
         }
     } else {
         graphics_set_color(g_pal.ok, g_pal.panel);
-        graphics_draw_text(disp, right, UI_Y_PADDING + 24, "No mismatches.");
+        graphics_draw_text(disp, left, UI_Y_PADDING + 78, "No mismatches.");
     }
 }
 
@@ -572,9 +572,10 @@ static void render_report_screen(surface_t *disp)
 {
     char line[112];
     char elapsed_compact[32];
-    graphics_set_color(g_pal.fg, g_pal.panel);
+    graphics_set_color(g_pal.ok, g_pal.panel);
     graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 12, "Report");
 
+    graphics_set_color(g_pal.fg, g_pal.panel);
     snprintf(line, sizeof(line), "Loops: %lu", (unsigned long)g_loop_completed);
     graphics_draw_text(disp, UI_X_PADDING, UI_Y_PADDING + 28, line);
 
@@ -611,31 +612,44 @@ static void render_footer(surface_t *disp)
     int footer_y = display_get_height() - 12;
 
     if (g_run_state == RUN_IDLE) {
-        left_hint = "A: toggle  B: default  C/L:quick  R:full  Z:burn";
+        left_hint = "A: toggle   C-L/R/U: quick/full/burn   Start: run";
     } else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) {
-        left_hint = "Start: pause/resume  B: stop";
+        left_hint = "B: stop    Start: pause/resume";
     } else {
-        left_hint = "A: setup  Start: rerun";
+        left_hint = "A: setup   Start: rerun";
     }
 
-    graphics_set_color(g_pal.muted, g_pal.panel);
+    graphics_draw_box(disp, 0, footer_y - 5, display_get_width(), footer_y+5, g_pal.accent);
+    graphics_set_color(g_pal.bg, g_pal.accent);
     graphics_draw_text(disp, UI_X_PADDING, footer_y, left_hint);
 }
 
 static void render_frame(surface_t *disp)
 {
-    const char *title = "N64Memtest 0.8 - Rasky/Libdragon";
-    int topbar_h = 10;
-    graphics_fill_screen(disp, g_pal.bg);
-    graphics_draw_box(disp, 2, 2, display_get_width() - 4, display_get_height() - 4, g_pal.panel);
+    const char *title = "N64Memtest 0.8 - by Rasky with Libdragon";
+    int topbar_h = 15;
+    graphics_fill_screen(disp, g_pal.panel);
 
-    graphics_draw_box(disp, 4, 4, display_get_width() - 8, topbar_h, g_pal.accent);
+    graphics_draw_box(disp, 0, 0, display_get_width(), topbar_h, g_pal.accent);
     graphics_set_color(g_pal.bg, g_pal.accent);
-    graphics_draw_text(disp, UI_X_PADDING, 5, title);
+    graphics_draw_text(disp, UI_X_PADDING, 3, title);
 
     if (g_run_state == RUN_IDLE) render_setup_screen(disp);
     else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) render_running_screen(disp);
     else render_report_screen(disp);
+
+    if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) {
+        joypad_inputs_t inputs = joypad_get_inputs(JOYPAD_PORT_1);
+        int analog_x = inputs.stick_x;
+        int analog_y = inputs.stick_y;
+        uint32_t logo_color = (g_run_state == RUN_PAUSED) ? g_pal.warn : g_pal.accent;
+        /* Fallback to C-stick emulation when main stick is neutral. */
+        if (analog_x == 0 && analog_y == 0) {
+            analog_x = inputs.cstick_x;
+            analog_y = inputs.cstick_y;
+        }
+        logo_draw(disp, display_get_width() - 60, 78, logo_color, (uint32_t)get_ticks_ms(), analog_x, analog_y);
+    }
 
     render_footer(disp);
 }
@@ -668,10 +682,11 @@ static void handle_setup_input(joypad_buttons_t pressed)
     if (g_setup_cursor < 0) g_setup_cursor = max_row;
     if (g_setup_cursor > max_row) g_setup_cursor = 0;
 
-    if (pressed.c_left || pressed.l) apply_profile(MEMTEST_PROFILE_QUICK);
-    if (pressed.c_right || pressed.r) apply_profile(MEMTEST_PROFILE_FULL);
-    if (pressed.z) apply_profile(MEMTEST_PROFILE_BURNIN);
-    if (pressed.b) apply_profile(MEMTEST_PROFILE_QUICK);
+    if (pressed.c_left) apply_profile(MEMTEST_PROFILE_QUICK);
+    if (pressed.c_right) apply_profile(MEMTEST_PROFILE_FULL);
+    if (pressed.c_up) apply_profile(MEMTEST_PROFILE_BURNIN);
+
+    if (pressed.start) start_run();
 
     if (!pressed.a) return;
     row = g_setup_cursor;
@@ -737,9 +752,6 @@ int main(void)
     g_run_state = RUN_IDLE;
     g_rng_seed = 0x1337c0deU;
 
-    g_moving_stack_buffer = memalign(16, MOVING_STACK_SIZE);
-    g_moving_stack_size = g_moving_stack_buffer ? MOVING_STACK_SIZE : 0U;
-
     for (i = 0; i < g_total_banks; i++) {
         g_bank_available[i] = true;
         g_bank_enabled[i] = true;
@@ -770,11 +782,6 @@ int main(void)
             uint32_t chunks_this_frame;
             for (chunks_this_frame = 0; chunks_this_frame < MEMTEST_CHUNKS_PER_FRAME; chunks_this_frame++) {
                 if (!(g_run_state == RUN_RUNNING || g_run_state == RUN_STOPPING)) break;
-                // if ((g_current_bank == g_total_banks - 1) && g_moving_stack_buffer) {
-                //     run_moving_stack(g_moving_stack_buffer, g_moving_stack_size, memtest_run_slice);
-                // } else {
-                //     memtest_run_slice();
-                // }
                 memtest_run_slice();
             }
             if (g_run_state == RUN_DONE) {

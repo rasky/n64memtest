@@ -2,11 +2,6 @@
 #include <libdragon.h>
 #include <string.h>
 
-static inline bool ranges_overlap_u32(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1)
-{
-    return (a0 < b1) && (b0 < a1);
-}
-
 static const memtest_desc_t g_desc[MEMTEST_ID_COUNT] = {
     [MEMTEST_RANDOM] = {"Random value", 2, false},
     [MEMTEST_CHECKERBOARD] = {"Checkerboard", 2, false},
@@ -385,7 +380,6 @@ void memtest_run_slice(void)
     uint32_t chunk_bytes;
     uint32_t packed_test_pass;
     uintptr_t fail_addr;
-    bool chunk_overlaps_moving_stack = false;
 
     if (g_run_state != RUN_RUNNING && g_run_state != RUN_STOPPING) return;
     if (g_current_test < 0 || g_current_bank < 0) {
@@ -398,24 +392,6 @@ void memtest_run_slice(void)
     chunk_bytes = CHUNK_SIZE_BYTES;
     packed_test_pass = (((uint32_t)g_current_pass & 0x00FFFFFFU) << 8)
         | ((uint32_t)g_current_test & 0xFFU);
-
-    if (g_moving_stack_buffer && g_moving_stack_size) {
-        uint32_t chunk_start = (uint32_t)chunk_phys;
-        uint32_t chunk_end = chunk_start + chunk_bytes;
-        uint32_t stack_start = (uint32_t)PhysicalAddr(g_moving_stack_buffer);
-        uint32_t stack_end = stack_start + g_moving_stack_size;
-        chunk_overlaps_moving_stack = ranges_overlap_u32(chunk_start, chunk_end, stack_start, stack_end);
-    }
-
-    if (chunk_overlaps_moving_stack) {
-        g_current_bank_offset += chunk_bytes;
-        if (g_current_bank_offset >= BANK_SIZE_BYTES) {
-            g_current_bank_offset = 0;
-            if (!memtest_advance_to_next_work_item()) return;
-        }
-        if (g_stop_requested) g_run_state = RUN_DONE;
-        return;
-    }
 
     volatile uint32_t *SI_STATUS = (volatile uint32_t *)0xa4800018;
 
