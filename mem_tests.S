@@ -13,6 +13,28 @@
  * Design constraints:
  *   - no stack usage
  *   - one call depth (main routine -> leaf helpers), no nested calls
+ *
+ * As much as I wanted for this code to be in C, there are a few reasons why
+ * it's not:
+ *   - Not using the stack makes it easier to run the test while the UI is updated.
+ *     Writing C code that doesn't use the stack is impossible. This could be
+ *     worked around using a trampoline that moves the stack away if needed.
+ *   - Not using global variables is also important, as those could get corrupted
+ *     during the test. Writing C code that doesn't access the data or bss segment
+ *     is possible but it is a bit more fragile (eg: I had a static const buffer in
+ *     C that was getting corrupted).
+ *   - We need the code to be prefetched into icache. This is also very unconvenient
+ *     to do in C unless you write a single giant C function, as multiple C functions
+ *     could have disjoint addresses that would need to be prefetched. Moreover you
+ *     must remember not to call into libdragon for any thing (eg: RSP DMA) and that
+ *     is also fragile to maintain over time.
+ *     - A possible workaorund here would be to dry-run the whole test once, but that's
+ *       also fragile as you need to make sure that all the needed codepaths are run
+ *       during the dryrun. Moroever, you need to make sure that the calling code
+ *       doesn't icache-conflict with the test code, which is also impossible to enforce.
+ *
+ * So all in all, I switched to assembly for this code. It's a huge amount of code,
+ * but it made it easier to make sure the tests didn't have some hidden race bugs.
  */
 
     .set noreorder
