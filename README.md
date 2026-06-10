@@ -6,9 +6,11 @@
 
 Built with [Libdragon](https://github.com/DragonMinded/libdragon).
 
-![Setup screen](docs/screenshots/setup.png)
-![Running screen](docs/screenshots/running.png)
-![Snake mini-game](docs/screenshots/snake.png)
+<p align="center">
+  <a href="docs/screenshots/setup.png"><img src="docs/screenshots/setup.png" width="260" alt="Setup screen"></a>
+  <a href="docs/screenshots/running.png"><img src="docs/screenshots/running.png" width="260" alt="Running screen"></a>
+  <a href="docs/screenshots/snake.png"><img src="docs/screenshots/snake.png" width="260" alt="Snake mini-game"></a>
+</p>
 
 ## Features
 
