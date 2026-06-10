@@ -106,7 +106,9 @@ void memtest_run_slice(void)
         return;
     }
 
-    chunk_phys = (phys_addr_t)(g_current_bank * BANK_SIZE_BYTES + g_current_bank_offset);
+    chunk_phys = (phys_addr_t)(g_memtest_phys_base
+        + ((uint32_t)g_current_bank * BANK_SIZE_BYTES)
+        + g_current_bank_offset);
     chunk = (uint8_t *)VirtualUncachedAddr(chunk_phys);
     chunk_bytes = CHUNK_SIZE_BYTES;
     packed_test_pass = (((uint32_t)g_current_pass & 0x00FFFFFFU) << 8)

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define BANK_SIZE_BYTES      (1024U * 1024U)
-#define MAX_BANKS            8
+#define MAX_BANKS            16
 #define CHUNK_SIZE_BYTES     (8U * 1024U)
 
 #if ((BANK_SIZE_BYTES % CHUNK_SIZE_BYTES) != 0U)
@@ -70,6 +70,7 @@ typedef struct {
 } mem_failure_t;
 
 extern int g_total_banks;
+extern uint32_t g_memtest_phys_base;
 extern int g_current_test;
 extern uint32_t g_current_pass;
 extern int g_current_bank;

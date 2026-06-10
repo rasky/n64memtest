@@ -1,3 +1,11 @@
+/*
+    n64memtest: a memory test for the N64
+    Written by Giovanni Bajo <giovannibajo@gmail.com>
+
+    This is free and unencumbered software released into the public domain.
+
+    For more information, please refer to <http://unlicense.org/>
+*/
 #include <libdragon.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -8,25 +16,22 @@
 
 #include "mem_test_engine.h"
 #include "logo.h"
-bool snake_is_active(void);
-void snake_stop(void);
-void snake_toggle(void);
-void snake_handle_input(joypad_buttons_t pressed);
-void snake_render(surface_t *disp, bool has_progress, uint32_t progress_pct, uint32_t errors);
+#include "snake.h"
 
-#define UI_LINE_HEIGHT 10
-#define UI_X_PADDING 8
-#define UI_Y_PADDING 8
-#define FAILURE_LOG_CAP 12
-#define FRAMEBUFFER_WIDTH 440
-#define FRAMEBUFFER_HEIGHT 240
-#define FRAMEBUFFER_COUNT 2
-#define FRAMEBUFFER0_PHYS (2U * 1024U * 1024U)
-#define FRAMEBUFFER1_PHYS (3U * 1024U * 1024U)
-#define FRAMEBUFFER_SIZE_BYTES (FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * 2U)
-#ifndef MEMTEST_CHUNKS_PER_FRAME
+#define UI_LINE_HEIGHT           10      
+#define UI_X_PADDING             8      
+#define UI_Y_PADDING             8
+#define FAILURE_LOG_CAP          12
+#define FRAMEBUFFER_WIDTH        440
+#define FRAMEBUFFER_HEIGHT       240
+#define FRAMEBUFFER_COUNT        2
+#define FRAMEBUFFER0_PHYS        (2U * 1024U * 1024U)
+#define FRAMEBUFFER1_PHYS        (3U * 1024U * 1024U)
+#define FRAMEBUFFER_SIZE_BYTES   (FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * 2U)
 #define MEMTEST_CHUNKS_PER_FRAME 32
-#endif
+#define IQUE_PHYS_MEM_BASE       0x01000000U
+#define IQUE_PHYS_MEM_SIZE_BYTES (16U * 1024U * 1024U)
+
 #if (FRAMEBUFFER_SIZE_BYTES > BANK_SIZE_BYTES)
 #error "Framebuffer must fit in one memory bank"
 #endif
@@ -52,6 +57,7 @@ typedef struct {
 int g_total_memory_bytes;
 int g_total_banks;
 int g_usable_banks;
+uint32_t g_memtest_phys_base;
 bool g_bank_available[MAX_BANKS];
 bool g_bank_enabled[MAX_BANKS];
 bool g_test_enabled[MEMTEST_ID_COUNT];
@@ -94,6 +100,24 @@ static int g_active_fb;
 static int g_pending_fb;
 
 static inline int min_int(int a, int b) { return a < b ? a : b; }
+static void configure_memory_layout(void)
+{
+    g_total_memory_bytes = get_memory_size();
+    g_memtest_phys_base = 0U;
+
+    if (sys_bbplayer()) {
+        /*
+         * iQue reports logical RAM via get_memory_size(), while the physical
+         * RAM window used by low-level tests is always 16 MiB mapped at
+         * 0x81000000 (cached) / 0xA1000000 (uncached).
+         */
+        g_total_memory_bytes = (int)IQUE_PHYS_MEM_SIZE_BYTES;
+        g_memtest_phys_base = IQUE_PHYS_MEM_BASE;
+        debugf("[memtest] iQue physical RDRAM mode enabled (base=%08lx, size=%lu)\n",
+               (unsigned long)g_memtest_phys_base,
+               (unsigned long)g_total_memory_bytes);
+    }
+}
 static int find_next_enabled_bank(int start);
 static bool work_item_valid(void);
 static inline bool ranges_overlap_u32(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1)
@@ -118,7 +142,7 @@ static void video_init_fixed_buffers(void)
 
     vi_init();
     vi_write_begin();
-    vi_reset();
+        vi_reset();
         vi_set_interlaced(false);
         vi_set_gamma(VI_GAMMA_DISABLE);
         vi_set_aa_mode(VI_AA_MODE_RESAMPLE);
@@ -150,7 +174,8 @@ static bool framebuffer_overlaps_upcoming_slices(int fb_idx)
 
     uint32_t fb_begin = (uint32_t)g_framebuffers[fb_idx].phys;
     uint32_t fb_end = fb_begin + FRAMEBUFFER_SIZE_BYTES;
-    uint32_t next_begin = (uint32_t)((uint32_t)g_current_bank * BANK_SIZE_BYTES + g_current_bank_offset);
+    uint32_t next_begin = g_memtest_phys_base
+        + (uint32_t)((uint32_t)g_current_bank * BANK_SIZE_BYTES + g_current_bank_offset);
     uint32_t next_end = next_begin + (MEMTEST_CHUNKS_PER_FRAME * CHUNK_SIZE_BYTES);
     return ranges_overlap_u32(next_begin, next_end, fb_begin, fb_end);
 }
@@ -246,13 +271,11 @@ static void apply_profile(memtest_profile_t profile)
 
 static uint32_t next_burnin_seed(uint32_t seed)
 {
-    /* Xorshift32 + timer stir for loop-to-loop variability. */
     uint32_t x = seed ? seed : 0x1337c0deU;
     x ^= x << 13;
     x ^= x >> 17;
     x ^= x << 5;
-    x ^= (uint32_t)get_ticks_us();
-    return x ? x : 0xA5A5A5A5U;
+    return x;
 }
 
 static void format_elapsed_compact(char *out, size_t out_size, uint32_t elapsed_ms)
@@ -846,7 +869,7 @@ int main(void)
     rsp_init();
     joypad_poll();
 
-    g_total_memory_bytes = get_memory_size();
+    configure_memory_layout();
     video_init_fixed_buffers();
     init_palette();
     g_total_banks = min_int(g_total_memory_bytes / (int)BANK_SIZE_BYTES, MAX_BANKS);
@@ -876,10 +899,15 @@ int main(void)
         joypad_poll();
         pressed = joypad_get_buttons_pressed(JOYPAD_PORT_1);
 
-        if (g_run_state == RUN_IDLE) handle_setup_input(pressed);
-        else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING) handle_running_input(pressed);
-        else handle_report_input(pressed);
-        if (!(g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING)) snake_stop();
+        if (g_run_state == RUN_IDLE)
+            handle_setup_input(pressed);
+        else if (g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING)
+            handle_running_input(pressed);
+        else
+            handle_report_input(pressed);
+        
+        if (!(g_run_state == RUN_RUNNING || g_run_state == RUN_PAUSED || g_run_state == RUN_STOPPING))
+            snake_stop();
 
         draw_fb = select_safe_framebuffer();
         tests_executing = (g_run_state == RUN_RUNNING || g_run_state == RUN_STOPPING);
